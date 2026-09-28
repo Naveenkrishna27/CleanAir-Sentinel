@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Real generated data is gitignored EXCEPT the sample snapshot, the trained
+# model, and the model manifest - these ARE committed, since they're what
+# makes the deployed app work without needing live API access.
+data/*.csv
+!data/sample/*.csv
+data/*.joblib
+!data/aq_forecaster.joblib
+data/*.json
+!data/model_manifest.json
+data/citizen_photos/*
+!data/citizen_photos/.gitkeep

@@ -1,0 +1,59 @@
+{
+  "manifest_version": "1.0",
+  "project": "CleanAir Sentinel",
+  "region": "bengaluru",
+  "generated_at": "2026-09-27T11:43:37.405852+00:00",
+  "model": {
+    "type": "random_forest",
+    "target_variable": "no2_mol_m2",
+    "feature_schema": [
+      "aerosol_index",
+      "wind_speed",
+      "humidity",
+      "temp",
+      "no2_mol_m2_lag1",
+      "no2_mol_m2_lag2",
+      "no2_mol_m2_lag3",
+      "no2_mol_m2_lag7",
+      "no2_mol_m2_roll3",
+      "no2_mol_m2_roll7",
+      "no2_mol_m2_std7",
+      "dayofweek",
+      "month"
+    ],
+    "training_rows": 36
+  },
+  "evaluation": {
+    "metric": "mean_absolute_error",
+    "value": 1e-05,
+    "validation_method": "time_series_cross_validation"
+  },
+  "data_sources": [
+    {
+      "name": "Sentinel-5P NO2",
+      "type": "satellite",
+      "provider": "Copernicus / ESA"
+    },
+    {
+      "name": "Sentinel-5P Aerosol Index",
+      "type": "satellite",
+      "provider": "Copernicus / ESA"
+    },
+    {
+      "name": "Surface meteorology",
+      "type": "reanalysis",
+      "provider": "NASA POWER"
+    },
+    {
+      "name": "Citizen photo severity",
+      "type": "crowdsourced",
+      "provider": "CleanAir Sentinel app users"
+    }
+  ],
+  "sharing_terms": {
+    "raw_data_included": false,
+    "pii_included": false,
+    "note": "Only model weights and this manifest are intended for cross-node sharing. Raw citizen photos and exact sensor coordinates stay local to the originating node/region."
+  },
+  "weights_artifact": "aq_forecaster.joblib"
+}
