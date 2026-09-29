@@ -61,6 +61,7 @@ st.markdown("""
         border-radius: 12px;
         padding: 18px 20px;
         height: 100%;
+        min-height: 172px;
     }
     .cas-kpi .kpi-label {
         color: #94A3B8; font-size: 0.8rem; font-weight: 500;
@@ -72,12 +73,33 @@ st.markdown("""
     .cas-kpi .kpi-sub { color: #64748B; font-size: 0.78rem; margin-top: 2px; }
 
     /* Tabs */
-    .stTabs [data-baseweb="tab-list"] { gap: 4px; margin-bottom: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #12182B; border-radius: 8px 8px 0 0;
-        padding: 10px 20px; color: #94A3B8; font-weight: 500;
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px; margin-bottom: 20px; border-bottom: none;
     }
-    .stTabs [aria-selected="true"] { background-color: #312E81 !important; color: #A5B4FC !important; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #12182B;
+        border: 1px solid rgba(148, 163, 184, 0.15);
+        border-radius: 10px;
+        padding: 14px 28px;
+        color: #94A3B8;
+        font-weight: 600;
+        font-size: 1.02rem;
+        transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #1A2138;
+        border-color: rgba(99, 102, 241, 0.4);
+        color: #C7D2FE;
+        transform: translateY(-1px);
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #4338CA !important;
+        border-color: #6366F1 !important;
+        color: #FFFFFF !important;
+        box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+    }
+    .stTabs [data-baseweb="tab-highlight"] { display: none; }
+    .stTabs [data-baseweb="tab-border"] { display: none; }
 
     /* Status badges — semantic colors only (green=live, amber=sample, rose=synthetic) */
     .cas-badge {
@@ -141,11 +163,25 @@ def _load_photo_reports() -> tuple[pd.DataFrame, str]:
     })
     df, source = _load_csv_with_fallback(CITIZEN_REPORTS_CSV, f"{SAMPLE_DIR}/citizen_reports.csv", demo)
     if source in ("real", "sample") and "severity_score" not in df.columns:
-        try:
-            df["severity_score"] = df["image_path"].apply(score_photo_severity)
-        except Exception as e:
-            st.warning(f"Could not score some citizen photos: {e}")
-            df["severity_score"] = 0.5
+        # Windows saves paths with backslashes; Linux (the deployed app) needs
+        # forward slashes. Forward slashes work on both.
+        df["image_path"] = df["image_path"].astype(str).str.replace("\\", "/", regex=False)
+
+        # Score each photo on its own. If one can't be read, skip just that
+        # report rather than inventing a severity for it.
+        def _score(path):
+            try:
+                return score_photo_severity(path)
+            except Exception:
+                return None
+
+        df["severity_score"] = df["image_path"].apply(_score)
+        unreadable = int(df["severity_score"].isna().sum())
+        if unreadable:
+            st.warning(f"{unreadable} citizen report(s) skipped: photo file could not be read.")
+        df = df.dropna(subset=["severity_score"]).reset_index(drop=True)
+        if df.empty:
+            return demo, "synthetic"
     return df, source
 
 
@@ -174,6 +210,19 @@ def badge_html(source_key: str, prefix: str = "") -> str:
     return f'<span class="cas-badge {css_class}">{prefix}{label}</span>'
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_aqi() -> dict:
+    """Streamlit reruns this script on every click, so cache the AQI for
+    10 minutes instead of calling the API each time."""
+    return fetch_bengaluru_aqi()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_enriched_alerts(alerts_df: pd.DataFrame) -> pd.DataFrame:
+    """Same reason: the school/hospital lookup hits OpenStreetMap once per alert."""
+    return enrich_alerts(alerts_df)
+
+
 def kpi_card(label: str, value: str, sub: str = "", accent: str = "#6366F1") -> str:
     return f"""
     <div class="cas-kpi" style="--accent: {accent};">
@@ -181,6 +230,22 @@ def kpi_card(label: str, value: str, sub: str = "", accent: str = "#6366F1") -> 
         <div class="kpi-value">{value}</div>
         <div class="kpi-sub">{sub}</div>
     </div>"""
+
+
+HOTSPOT_COLUMNS = ["hotspot_score", "lat", "lon", "citizen_severity", "no2_umol_m2", "aerosol_index"]
+
+
+def hotspot_view(df: pd.DataFrame, columns: list = None) -> pd.DataFrame:
+    """Compact, readable version of the hotspot table for display.
+
+    NO2 is shown in umol/m2: the raw mol/m2 values are around 0.00005, which
+    round to 0.0001 at four decimals and hide any difference between cells.
+    The diagnostic *_norm columns are left out; they are internal working."""
+    out = df.copy()
+    if "no2_mol_m2" in out.columns:
+        out["no2_umol_m2"] = out["no2_mol_m2"] * 1e6
+    out = out[[c for c in (columns or HOTSPOT_COLUMNS) if c in out.columns]]
+    return out.round({"hotspot_score": 3, "lat": 4, "lon": 4, "citizen_severity": 3, "no2_umol_m2": 1, "aerosol_index": 2})
 
 
 # --- Load data & compute hotspots once, up front -------------------------
@@ -192,8 +257,6 @@ try:
 except Exception:
     hotspots = pd.DataFrame()
 
-alerts = hotspots[hotspots["hotspot_score"] > ALERT_THRESHOLD] if not hotspots.empty else pd.DataFrame()
-
 # --- Sidebar --------------------------------------------------------------
 with st.sidebar:
     st.markdown('<div class="cas-sidebar-title">🛰️ CleanAir Sentinel</div>', unsafe_allow_html=True)
@@ -204,7 +267,16 @@ with st.sidebar:
     st.caption("Citizen reports")
     st.markdown(badge_html(photos_source), unsafe_allow_html=True)
     st.divider()
+    st.markdown("**Alert sensitivity**")
+    ALERT_THRESHOLD = st.slider(
+        "Alert threshold", 0.3, 0.95, 0.7, 0.05,
+        help="A location raises an alert when its hotspot score is above this. Lower it to flag more locations.",
+    )
+    st.divider()
     st.caption("Built on Google Earth Engine, NASA POWER, and OpenStreetMap — all free, open data sources.")
+    st.caption("AQI: Open-Meteo / Copernicus CAMS model (CC BY 4.0)")
+
+alerts = hotspots[hotspots["hotspot_score"] > ALERT_THRESHOLD] if not hotspots.empty else pd.DataFrame()
 
 # --- Header ----------------------------------------------------------------
 st.markdown("""
@@ -215,7 +287,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- KPI row -----------------------------------------------------------
-aqi_data = fetch_bengaluru_aqi()
+aqi_data = get_aqi()
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     st.markdown(kpi_card("Grid cells monitored", str(len(hotspots)) if not hotspots.empty else "—", "5km resolution", "#6366F1"), unsafe_allow_html=True)
@@ -229,8 +301,16 @@ with k4:
     st.markdown(kpi_card("Avg NO2 (grid)", avg_no2, "mol/m²", "#34D399"), unsafe_allow_html=True)
 with k5:
     aqi_val = str(aqi_data["aqi"]) if aqi_data.get("aqi") is not None else "—"
-    aqi_sub = aqi_data.get("category") or ("Set WAQI_TOKEN in .env" if aqi_data.get("error") else "")
-    st.markdown(kpi_card("Bengaluru AQI (live)", aqi_val, aqi_sub, "#F59E0B"), unsafe_allow_html=True)
+    if aqi_data.get("aqi") is not None:
+        # Always show WHEN it was measured, and only call it "live" if it is
+        # fresh - a station can go quiet and keep returning its last value.
+        aqi_label = "Bengaluru AQI (stale)" if aqi_data.get("stale") else "Bengaluru AQI"
+        aqi_sub = f"{aqi_data['category']} · {aqi_data['updated_text']}" if aqi_data.get("updated_text") else aqi_data["category"]
+        aqi_sub += "<br>Modelled · CAMS" if not aqi_data.get("stale") else "<br>Last reported reading"
+    else:
+        aqi_label = "Bengaluru AQI"
+        aqi_sub = "Reading unavailable"
+    st.markdown(kpi_card(aqi_label, aqi_val, aqi_sub, "#F59E0B"), unsafe_allow_html=True)
 
 st.write("")
 
@@ -259,8 +339,7 @@ with tab_map:
             fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig, use_container_width=True)
 
-            display_cols = [c for c in ["lat", "lon", "citizen_severity", "no2_mol_m2", "aerosol_index", "hotspot_score"] if c in hotspots.columns]
-            st.dataframe(hotspots[display_cols].round(4), use_container_width=True)
+            st.dataframe(hotspot_view(hotspots), use_container_width=True, hide_index=True)
 
 # --- Submit a report (citizen photo intake) ---------------------------------
 with tab_submit:
@@ -363,7 +442,21 @@ with tab_alerts:
         else:
             st.error(f"{len(alerts)} location(s) above alert threshold ({ALERT_THRESHOLD})")
             with st.spinner("Checking nearby schools/hospitals via OpenStreetMap..."):
-                enriched = enrich_alerts(alerts)
-            st.dataframe(enriched, use_container_width=True)
+                enriched = get_enriched_alerts(alerts)
+            st.dataframe(
+                hotspot_view(enriched, columns=[
+                    "hotspot_score", "recommended_action", "schools_nearby", "hospitals_nearby",
+                    "lat", "lon", "citizen_severity", "no2_umol_m2", "aerosol_index",
+                ]),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "hotspot_score": st.column_config.NumberColumn("Score"),
+                    "recommended_action": st.column_config.TextColumn("Recommended action", width="large"),
+                    "schools_nearby": st.column_config.NumberColumn("Schools nearby"),
+                    "hospitals_nearby": st.column_config.NumberColumn("Health facilities nearby"),
+                    "no2_umol_m2": st.column_config.NumberColumn("NO2 (µmol/m²)"),
+                },
+            )
 
 st.markdown('<div class="cas-footer">CleanAir Sentinel · Built with Sentinel-5P, NASA POWER &amp; OpenStreetMap · Build with AI: Code for Communities, 2nd Edition</div>', unsafe_allow_html=True)

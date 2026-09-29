@@ -13,118 +13,137 @@ climate action and threatens public health.
 ## What this is
 
 A platform that fuses:
-- **Citizen-sourced reports** — photos + location, submitted through the app
+- **Citizen-sourced reports** — photos + location, submitted through the app,
+  scored for haze/smog severity
 - **Satellite imagery** — Sentinel-5P (NO2, aerosol index) via Google Earth Engine
 - **Meteorological data** — wind, humidity, temperature via NASA POWER
+- **A live city-scale AQI reading** — Open-Meteo / Copernicus CAMS model, for
+  independent context alongside the hyper-local grid
 
-...into hotspot detection, short-horizon AQ forecasting, and alerts, plus a
-documented, versioned model-export design so predictive models (not raw
-data) could be shared across BRICS nodes.
+...into hotspot detection, short-horizon AQ forecasting, and decision-ready
+alerts enriched with nearby schools/hospitals and a recommended response —
+plus a documented, versioned model-export design so predictive models (not
+raw data) could be shared across BRICS nodes.
 
-## Scope for this hackathon (MVP)
+## Status
 
-Scoped to **Bengaluru** for the working demo. The federated/cross-border
-layer is a documented model-export manifest design (see
-`docs/federated_model_exchange.md`), not a live multi-node system — that's
-the honest scaling story for the pitch, not something built live in 8 days.
+Scoped to **Bengaluru** for the working demo, with a live deployment.
 
 | Component | Status |
 |---|---|
-| Data ingestion (satellite + met, via `data_ingestion.py`) | Built — **not yet run against live data** |
-| Citizen report intake (Streamlit upload form) | Built |
-| Hotspot detection (CV heuristic + robust scoring + anomaly detection) | Built |
-| AQ forecasting (multi-model comparison + time-series CV) | Built — **not yet run against live data** |
-| Dashboard (map, submit, forecast, alerts tabs) | Built |
-| Sample-data offline fallback | Built — **needs a real snapshot saved once ingestion runs** |
-| Federated model-export manifest | Built |
-| Demo video / final submission | Not started |
+| Data ingestion (Sentinel-5P + NASA POWER) | Live — 49-date timeseries, 20+ point grid |
+| Citizen report intake (photo upload + geotagging) | Live — real submitted reports |
+| Hotspot detection (robust scoring + anomaly detection) | Live |
+| AQ forecasting (multi-model comparison + time-series CV) | Live — model trained and deployed |
+| Live city AQI (Open-Meteo / CAMS) | Live |
+| Alerts enriched with nearby schools/hospitals (OpenStreetMap) | Live |
+| Dashboard (map, submit, forecast, alerts, adjustable alert threshold) | Live |
+| Federated model-export manifest | Built (design artifact, see below) |
 
 ## Modeling approach
 
 **Forecasting** — `forecasting.py` cross-validates Ridge, Random Forest,
 Gradient Boosting, and (if installed) XGBoost/LightGBM under **chronological
-time-series splits** — never shuffled, so validation never leaks future
-data into the past. The best performer by mean MAE is auto-selected and
-refit on all available data. Cite the leaderboard in the pitch: "we
-evaluated N models under time-series CV and selected X (MAE: Y)."
+time-series splits** — never shuffled, so validation never leaks future data
+into the past. The best performer by mean MAE is auto-selected and refit on
+all available data.
 
-**Hotspot scoring** — `hotspot_detection.py` uses percentile-based robust
-scaling instead of min-max (so one outlier reading doesn't distort every
-other location's score), blended with an Isolation Forest anomaly score, so
-a location ranks as a hotspot for being genuinely unusual, not just for
-having the highest raw average.
+**Hotspot scoring** — `hotspot_detection.py` combines three signals per grid
+cell: citizen photo severity (used directly, since it's already a 0–1 score
+and too sparse for percentile scaling to behave sensibly), percentile-scaled
+satellite NO2/aerosol readings (so one outlier reading doesn't distort every
+other cell), and an Isolation Forest anomaly score, so a location ranks as a
+hotspot for being genuinely unusual, not just for having the highest raw
+average. The alert threshold is adjustable live in the dashboard.
+
+**Decision support** — `impact_context.py` looks up nearby schools and
+hospitals for each alert via OpenStreetMap's Overpass API, and derives a
+rule-based (not ML — with this little data, a trained recommender would be
+overfitting theater) recommended action: a public-health advisory when
+aerosol/haze dominates, a traffic/emissions check when NO2 dominates, flagged
+URGENT when a school or health facility is nearby.
 
 **Federated model exchange** — rather than implementing real federated
-learning (out of scope for 8 days), `model_export.py` produces a versioned
-JSON manifest describing a trained model's features, region, and evaluation
-metric, so another BRICS node could evaluate and adopt it without either
-side sharing raw data. Full design rationale in
-`docs/federated_model_exchange.md`.
+learning (a multi-week distributed-systems project, out of scope for this
+hackathon), `model_export.py` produces a versioned JSON manifest describing a
+trained model's features, region, and evaluation metric, so another BRICS
+node could evaluate and adopt it without either side sharing raw data. Full
+design rationale in `federated_model_exchange.md`.
 
 ## Architecture
 
 ```
 Citizen reports (app upload) ─┐
-Satellite imagery ────────────┼──▶ Fusion & AI layer ──┬──▶ Hotspot detection ──▶ Authority alerts
-Met + AQ sensors ──────────────┘                        └──▶ AQ forecasting ────▶ Model manifest (BRICS exchange)
+Satellite imagery ────────────┼──▶ Fusion & scoring ──┬──▶ Hotspot map ──▶ Alerts + nearby schools/hospitals ──▶ Recommended action
+Met + AQ sensors ──────────────┘                       └──▶ AQ forecasting ──▶ Model manifest (BRICS exchange)
+
+Live city AQI (independent check) ──▶ Dashboard KPI
 ```
 
 ## Setup
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate    # venv\Scripts\activate on Windows
 pip install -r requirements.txt
 ```
 
-Then set `EE_PROJECT_ID` in `.env` — **important**: this must be a project
-that shows under "Earth Engine enabled Cloud Projects" at
-code.earthengine.google.com (check the project switcher there), not just any
-Cloud project. Running `earthengine authenticate` the first time opens a
-browser for OAuth.
+Set `EE_PROJECT_ID` in `.env` — must be a project registered under "Earth
+Engine enabled Cloud Projects" at code.earthengine.google.com. Running the
+app the first time opens a browser for Earth Engine OAuth. No key is needed
+for NASA POWER, OpenStreetMap, or the AQI source.
 
 ## Running the pipeline
 
 ```bash
 # 1. Pull real satellite + weather data, and save an offline sample snapshot
-python src/data_ingestion.py
+python data_ingestion.py
 
 # 2. Train & select the best forecasting model, and write the model manifest
-python src/forecasting.py
+python forecasting.py
 
 # 3. Launch the dashboard
-streamlit run src/app.py
+streamlit run app.py
 ```
 
+Submit citizen reports through the app's "Submit a report" tab, then run
+`python save_citizen_sample.py` to snapshot them (metadata-stripped,
+coordinates rounded) into the committed offline-fallback tier.
+
 The dashboard always shows which data tier it's displaying (live / cached
-sample / synthetic placeholder), so it's never ambiguous what's real during
-a demo.
+sample / synthetic placeholder) for both satellite and citizen data, so it's
+never ambiguous what's real during a demo.
 
 ## Project structure
 
 ```
-clean-air-platform/
+CleanAir Sentinel/
 ├── data/
 │   ├── sample/             # committed offline-fallback snapshot (real data)
 │   ├── citizen_photos/     # uploaded report photos (gitignored)
-│   └── *.csv, *.joblib     # live-generated data (gitignored)
-├── docs/
-│   └── federated_model_exchange.md
-├── src/
-│   ├── data_ingestion.py   # satellite + met data, writes sample snapshot
-│   ├── hotspot_detection.py
-│   ├── forecasting.py      # model comparison + manifest export
-│   ├── model_export.py     # federated model manifest
-│   └── app.py               # Streamlit dashboard (map, submit, forecast, alerts)
+│   └── *.csv, *.joblib     # live-generated data (committed: model + manifest; gitignored: raw CSVs)
+├── app.py                  # Streamlit dashboard
+├── data_ingestion.py       # satellite + met data, writes sample snapshot
+├── hotspot_detection.py    # citizen + satellite fusion, anomaly scoring
+├── forecasting.py          # model comparison + manifest export
+├── model_export.py         # federated model manifest
+├── impact_context.py       # nearby schools/hospitals + recommended action
+├── aqi_fetch.py            # live city-scale AQI (Open-Meteo/CAMS)
+├── save_citizen_sample.py  # sanitizes + snapshots citizen reports for commit
+├── federated_model_exchange.md
 └── requirements.txt
 ```
 
 ## Target corridor
 
 **Bengaluru metro area** (bbox: 77.40–77.75°E, 12.85–13.15°N), centered on
-(12.9716, 77.5946).
+(12.9716, 77.5946) — the same point used in the team's existing
+[AI-Weather-Forecasting](https://github.com/Naveenkrishna27/AI-Weather-Forecasting)
+project.
 
-## Earth Engine project
+## Data sources & attribution
 
-Registered project: `gee-nk-projects` (confirmed working — verified via a
-live Sentinel-5P query in the Earth Engine Code Editor).
+- Satellite: Copernicus Sentinel-5P, via Google Earth Engine
+- Meteorology: NASA POWER
+- Live AQI: Open-Meteo / Copernicus Atmosphere Monitoring Service (CC BY 4.0)
+- Nearby institutions: © OpenStreetMap contributors

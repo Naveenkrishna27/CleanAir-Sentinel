@@ -1,57 +1,83 @@
 """
-Real ground-station AQI for Bengaluru, via the WAQI (World Air Quality
-Index) API. Free token, issued instantly by email at
-https://aqicn.org/data-platform/token/ — no approval wait.
+Current air quality (US AQI) for Bengaluru, from the Open-Meteo Air Quality
+API - free, no API key, no signup. Data: Copernicus Atmosphere Monitoring
+Service (CAMS), served by Open-Meteo under CC BY 4.0.
 
-Deliberately NOT derived from our own Sentinel-5P NO2 column density:
-converting a satellite vertical column to ground-level AQI needs
-boundary-layer-height assumptions that would make the number scientifically
-shaky. This is a second, independent, real data source instead — actual
-ground monitoring stations reporting the standard AQI.
+IMPORTANT - this is a MODELLED value, not a ground-station measurement.
+CAMS is an atmospheric model (roughly tens of km resolution outside Europe),
+so treat it as a city-scale estimate. The dashboard labels it "modelled" for
+that reason. It is an independent source from our own Sentinel-5P satellite
+readings and citizen reports.
+
+Why not a ground-station feed: the nearest WAQI stations for Bengaluru had
+stopped reporting (the closest last reported in June), and WAQI's city-name
+lookup once returned a station in Delhi. A live modelled number, honestly
+labelled, is better than a stale or wrong-city measurement.
 """
 
-import os
+import time
+from datetime import datetime, timezone
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+BENGALURU_LAT, BENGALURU_LON = 12.9716, 77.5946
+STALE_AFTER_HOURS = 3
+IST_OFFSET_SECONDS = 19800  # Asia/Kolkata is a fixed UTC+05:30, no daylight saving
 
-WAQI_TOKEN = os.getenv("WAQI_TOKEN", "")
+URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
 
 def fetch_bengaluru_aqi() -> dict:
     """
-    Returns the current AQI for Bengaluru from the nearest reporting
-    ground station, plus its category label. Returns None values on any
-    failure (missing token, network issue, no station data) rather than
-    raising — an AQI card failing shouldn't break the rest of the
-    dashboard.
+    Returns the current modelled US AQI for Bengaluru, its category, the
+    time the value is for, and whether it is stale. Never raises - on any
+    failure the AQI is None so one bad API call can't break the dashboard.
     """
-    if not WAQI_TOKEN:
-        return {"aqi": None, "category": None, "station": None, "error": "WAQI_TOKEN not set in .env"}
+    empty = {"aqi": None, "category": None, "station": None, "updated_text": None, "stale": False}
 
-    url = f"https://api.waqi.info/feed/bengaluru/"
+    params = {
+        "latitude": BENGALURU_LAT,
+        "longitude": BENGALURU_LON,
+        "current": "us_aqi,pm2_5",
+        "timezone": "Asia/Kolkata",
+    }
     try:
-        resp = requests.get(url, params={"token": WAQI_TOKEN}, timeout=15)
+        resp = requests.get(URL, params=params, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
-        if payload.get("status") != "ok":
-            return {"aqi": None, "category": None, "station": None, "error": payload.get("data", "WAQI request failed")}
-
-        data = payload["data"]
-        aqi = data.get("aqi")
-        return {
-            "aqi": aqi,
-            "category": _aqi_category(aqi),
-            "station": data.get("city", {}).get("name"),
-        }
     except Exception as e:
-        return {"aqi": None, "category": None, "station": None, "error": str(e)}
+        return {**empty, "error": f"Open-Meteo request failed: {e}"}
+
+    current = payload.get("current") or {}
+    try:
+        aqi = int(round(float(current["us_aqi"])))
+    except (KeyError, TypeError, ValueError):
+        return {**empty, "error": "Open-Meteo returned no AQI value"}
+
+    updated_text, age_hours = None, None
+    stamp = current.get("time")  # e.g. "2026-09-28T16:00", local time (Asia/Kolkata)
+    if stamp:
+        try:
+            local = datetime.strptime(stamp, "%Y-%m-%dT%H:%M")
+            updated_text = local.strftime("%d %b, %H:%M")
+            offset = payload.get("utc_offset_seconds", IST_OFFSET_SECONDS)
+            epoch = local.replace(tzinfo=timezone.utc).timestamp() - offset
+            age_hours = (time.time() - epoch) / 3600
+        except ValueError:
+            pass
+
+    return {
+        "aqi": aqi,
+        "category": _aqi_category(aqi),
+        "station": "CAMS atmospheric model",
+        "updated_text": updated_text,
+        "age_hours": age_hours,
+        "stale": age_hours is not None and age_hours > STALE_AFTER_HOURS,
+    }
 
 
 def _aqi_category(aqi) -> str:
-    """Standard US EPA-style AQI category bands."""
+    """Standard US EPA AQI category bands."""
     if aqi is None or not isinstance(aqi, (int, float)):
         return "Unknown"
     if aqi <= 50:

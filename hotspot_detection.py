@@ -2,9 +2,11 @@
 Hotspot detection: combines citizen photo severity scoring with satellite
 AQ index to flag pollution hotspots on a grid.
 
-- Percentile-based robust scaling, so one broken sensor reading or one
-  extreme photo doesn't distort every other cell's score.
-- An Isolation Forest anomaly score as a second signal, rewarding cells
+- Satellite values use percentile-based robust scaling, so one broken sensor
+  reading doesn't distort every other cell's score.
+- Citizen severity is already a 0-1 haze score, so it is used as-is (see the
+  note in flag_hotspots for why it must NOT go through percentile scaling).
+- An Isolation Forest anomaly score is a second signal, rewarding cells
   that are genuinely unusual relative to the whole dataset.
 """
 
@@ -28,7 +30,7 @@ def score_photo_severity(image_path: str) -> float:
     """
     Returns a 0-1 haze/smog severity score using a dark-channel-prior style
     heuristic: hazy images have low contrast and washed-out saturation.
-    A fast, explainable baseline — swap for a trained classifier only if
+    A fast, explainable baseline - swap for a trained classifier only if
     you get labeled data with time to spare.
     """
     img = cv2.imread(image_path)
@@ -63,9 +65,9 @@ def flag_hotspots(
     photo_reports: DataFrame with columns [lat, lon, severity_score, timestamp]
     satellite_df: DataFrame with columns [lat, lon, no2_mol_m2, aerosol_index]
 
-    Bins both onto a shared grid, scores each cell with a robust weighted
-    average plus an Isolation Forest anomaly score, and returns a ranked
-    table with real lat/lon per cell for mapping.
+    Bins both onto a shared grid, scores each cell with a weighted average
+    plus an Isolation Forest anomaly score, and returns a ranked table with
+    real lat/lon per cell for mapping.
     """
     def to_grid_cell(lat, lon, size_km):
         deg_size = size_km / 111.0
@@ -101,7 +103,15 @@ def flag_hotspots(
     ].fillna(0)
 
     feature_cols = ["citizen_severity", "no2_mol_m2", "aerosol_index"]
-    for col in feature_cols:
+
+    # Citizen severity is already a 0-1 haze score, and most cells have no
+    # report at all (filled with 0). Percentile scaling collapses in that case:
+    # with only a few reports the 5th and 95th percentiles are both 0, so every
+    # cell would get the fixed value 0.5 and the real reports would have no
+    # effect. So the citizen score is used as-is, and only the satellite
+    # values, which vary in every cell, are percentile-scaled.
+    combined["citizen_severity_norm"] = combined["citizen_severity"].clip(0, 1)
+    for col in ("no2_mol_m2", "aerosol_index"):
         combined[f"{col}_norm"] = _robust_scale(combined[col])
 
     combined["avg_score"] = combined[[f"{c}_norm" for c in feature_cols]].mean(axis=1)
