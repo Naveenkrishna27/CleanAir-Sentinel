@@ -217,9 +217,12 @@ def get_aqi() -> dict:
     return fetch_bengaluru_aqi()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_enriched_alerts(alerts_df: pd.DataFrame) -> pd.DataFrame:
-    """Same reason: the school/hospital lookup hits OpenStreetMap once per alert."""
+    """The school/hospital lookup hits OpenStreetMap once per alert, so this
+    is cached - but only for 10 minutes, not longer: Overpass's free public
+    server can fail transiently, and a failed lookup should self-heal on
+    the next visit rather than showing "unavailable" for a long time."""
     return enrich_alerts(alerts_df)
 
 
@@ -443,6 +446,16 @@ with tab_alerts:
             st.error(f"{len(alerts)} location(s) above alert threshold ({ALERT_THRESHOLD})")
             with st.spinner("Checking nearby schools/hospitals via OpenStreetMap..."):
                 enriched = get_enriched_alerts(alerts)
+
+            if not enriched["lookup_ok"].all():
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.warning("The nearby-institution lookup didn't respond for one or more alerts.")
+                with col2:
+                    if st.button("Retry lookup", use_container_width=True):
+                        get_enriched_alerts.clear()
+                        st.rerun()
+
             st.dataframe(
                 hotspot_view(enriched, columns=[
                     "hotspot_score", "recommended_action", "schools_nearby", "hospitals_nearby",
