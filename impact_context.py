@@ -11,12 +11,13 @@ training a real recommendation model would be overfitting theater. A
 transparent if/else is more honest AND more explainable to a judge who
 asks "why did it recommend that."
 
-Robustness: Overpass's free public instance can be slow or briefly
-unavailable, especially from a shared hosting IP (e.g. Streamlit Cloud). A
-single failed request should not look identical to "genuinely zero schools
-nearby" - so failures are distinguished with an explicit status, retried
-once, and the caller (app.py) is expected to cache successes for longer
-than failures so a transient timeout self-heals quickly instead of
+Robustness: Overpass's main public instance (overpass-api.de) is shared
+across many apps and can be slow or briefly unavailable, especially from a
+shared hosting IP (e.g. Streamlit Cloud). A single failed request should
+not look identical to "genuinely zero schools nearby" - so failures are
+retried across TWO independent public Overpass mirrors before giving up,
+with an explicit status the caller can act on. app.py caches successes
+longer than failures so a transient outage self-heals quickly instead of
 freezing a wrong "None" on screen for a long time.
 """
 
@@ -24,7 +25,12 @@ import time
 
 import requests
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Two independent public mirrors - if the main instance is overloaded, the
+# second (a different operator, different infrastructure) often still works.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
 
 
 def fetch_nearby_institutions(lat: float, lon: float, radius_m: int = 2000, retries: int = 1) -> dict:
@@ -33,9 +39,9 @@ def fetch_nearby_institutions(lat: float, lon: float, radius_m: int = 2000, retr
     of (lat, lon), using OpenStreetMap's Overpass API. No API key required.
 
     Returns {"schools": int, "hospitals": int, "ok": True} on success, or
-    {"schools": None, "hospitals": None, "ok": False, "error": str} if the
-    lookup could not complete - callers should treat ok=False as "unknown",
-    not as "zero", and should not cache it for long.
+    {"schools": None, "hospitals": None, "ok": False, "error": str} if every
+    mirror failed - callers should treat ok=False as "unknown", not "zero",
+    and should not cache it for long.
     """
     query = f"""
     [out:json][timeout:20];
@@ -47,18 +53,19 @@ def fetch_nearby_institutions(lat: float, lon: float, radius_m: int = 2000, retr
     out body;
     """
     last_error = None
-    for attempt in range(retries + 1):
-        try:
-            resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=25)
-            resp.raise_for_status()
-            elements = resp.json().get("elements", [])
-            schools = sum(1 for e in elements if e.get("tags", {}).get("amenity") == "school")
-            hospitals = sum(1 for e in elements if e.get("tags", {}).get("amenity") in ("hospital", "clinic"))
-            return {"schools": schools, "hospitals": hospitals, "ok": True}
-        except Exception as e:
-            last_error = str(e)
-            if attempt < retries:
-                time.sleep(1.5)
+    for url in OVERPASS_URLS:
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.post(url, data={"data": query}, timeout=25)
+                resp.raise_for_status()
+                elements = resp.json().get("elements", [])
+                schools = sum(1 for e in elements if e.get("tags", {}).get("amenity") == "school")
+                hospitals = sum(1 for e in elements if e.get("tags", {}).get("amenity") in ("hospital", "clinic"))
+                return {"schools": schools, "hospitals": hospitals, "ok": True}
+            except Exception as e:
+                last_error = str(e)
+                if attempt < retries:
+                    time.sleep(1.5)
 
     return {"schools": None, "hospitals": None, "ok": False, "error": last_error}
 
@@ -88,7 +95,7 @@ def recommend_action(hotspot_row, ctx: dict) -> str:
         tags.append(f"{hospitals} health facilit{'ies' if hospitals != 1 else 'y'}")
 
     if tags:
-        action = f"URGENT — {action} (near {', '.join(tags)})"
+        action = f"URGENT \u2014 {action} (near {', '.join(tags)})"
 
     return action
 
